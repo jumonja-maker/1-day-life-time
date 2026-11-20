@@ -61,7 +61,7 @@ def inspect_world(work,points):
  return result
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--java',default='java');ap.add_argument('--mod',required=True,type=Path);ap.add_argument('--work',required=True,type=Path);ap.add_argument('--config',type=Path,default=Path(__file__).with_name('pinned_config.json'));ap.add_argument('--prepared',action='store_true');ap.add_argument('--existing-audit',action='store_true',help='Add targets only to a successfully completed world created by this audit');ap.add_argument('--trust-store',type=Path);ap.add_argument('--max-seconds',type=int,default=900);ap.add_argument('--port',type=int,default=25595);args=ap.parse_args()
+ ap=argparse.ArgumentParser();ap.add_argument('--java',default='java');ap.add_argument('--mod',required=True,type=Path);ap.add_argument('--work',required=True,type=Path);ap.add_argument('--config',type=Path,default=Path(__file__).with_name('pinned_config.json'));ap.add_argument('--prepared',action='store_true');ap.add_argument('--single-boot',action='store_true',help='Generate and save only; no reopen');ap.add_argument('--freeze-simulation',action='store_true',help='Freeze native game simulation before target requests');ap.add_argument('--existing-audit',action='store_true',help='Add targets only to a successfully completed world created by this audit');ap.add_argument('--trust-store',type=Path);ap.add_argument('--max-seconds',type=int,default=900);ap.add_argument('--port',type=int,default=25595);args=ap.parse_args()
  cfg=json.loads(args.config.read_text());work=args.work.resolve();mod=args.mod.resolve();work.mkdir(parents=True,exist_ok=True)
  if args.existing_audit:
   previous=json.loads((work/'smoke_result.json').read_text())
@@ -100,7 +100,7 @@ def main():
   if not args.existing_audit:
    (work/'server.properties').write_text(''.join(k+'='+v+'\n' for k,v in props.items()));event('created_fresh_world_config',properties=props)
   else:event('continuing_verified_audit_world',original_result=str(work/'smoke_result.json'))
-  for phase in ['first_boot','reopen']:
+  for phase in (['first_boot'] if args.single_boot else ['first_boot','reopen']):
    logpath=work/(('extra_' if args.existing_audit else '')+phase+'.log');active_log=logpath.open('w',buffering=1);q=queue.Queue();lines=[]
    command=[args.java,'-Xms512m','-Xmx2g','-XX:ActiveProcessorCount=2','-XX:-UsePerfData',*jvmtrust,'-jar',str(work/'fabric-server-launch.jar'),'nogui']
    proc=subprocess.Popen(command,cwd=work,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
@@ -122,6 +122,9 @@ def main():
     raise TimeoutError('Timed out waiting for '+pattern)
    ready=wait_match(r'Done \([0-9.,]+s\)!',min(360,args.max_seconds));event('ready',phase=phase,line=ready)
    send('seed');send('datapack list enabled')
+   if args.freeze_simulation:
+    send('tick freeze');wait_match(r'(frozen|Frozen)',10);event('simulation_frozen',phase=phase)
+    send('weather clear 1000000');wait_match(r'(clear weather|weather to clear)',10)
    for index,p in enumerate(cfg['points']):
     token='FG_AUDIT_LOADED_'+phase+'_'+str(index);send(f'forceload add {p["x"]} {p["z"]}')
     loaded=False;end=min(deadline,time.monotonic()+120)
@@ -142,7 +145,9 @@ def main():
    gen=saved['worldgen'];settings=gen['dimensions']['minecraft:overworld']['generator']['settings']
    if settings!=cfg['settings']:raise RuntimeError('Wrong actual generator settings '+str(settings))
    event('saved_world_verified',phase=phase,settings=settings,targets=len(saved['chunks']))
-  result['sections_equal_after_reopen']={a['name']:a['sections_sha256']==b['sections_sha256'] for a,b in zip(result['first_boot']['chunks'],result['reopen']['chunks'])}
+  result['sections_equal_after_reopen']=None if args.single_boot else {a['name']:a['sections_sha256']==b['sections_sha256'] for a,b in zip(result['first_boot']['chunks'],result['reopen']['chunks'])}
+  if args.single_boot:result['scope']='Unmodified mod, native FULL chunks, single fresh boot and save; no reopen.'
+  result['simulation_frozen']=args.freeze_simulation
   result['mod_unchanged']=sha(mod)==cfg['mod_sha256'] and sha(work/'mods'/'freshgenerator-audited.jar')==cfg['mod_sha256'];result['success']=True;event('passed')
  except BaseException as exc:
   result['failure']={'type':type(exc).__name__,'message':str(exc)};event('failed',**result['failure'])
@@ -157,3 +162,4 @@ def main():
   result['end_utc']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime());write(result_path,result);print(json.dumps({'success':result['success'],'result':str(result_path),'failure':result.get('failure')},ensure_ascii=False))
  return 0 if result['success'] else 1
 if __name__=='__main__':raise SystemExit(main())
+
